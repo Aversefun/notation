@@ -7,3 +7,5 @@ compile from nothing.
 
 At the moment, configuration and plugins do not exist, but in the future
 configuration WILL be added, and plugins MIGHT.
+
+Keybinds: https://aversefun.github.io/notation/keybinds.html
