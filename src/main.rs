@@ -3,7 +3,7 @@
 
 use std::{cell::RefCell, fmt::Display, path::Path, rc::Rc};
 
-use color_eyre::{eyre::eyre, Result};
+use color_eyre::{Result, eyre::eyre};
 use crossterm::event::{self, Event};
 use ratatui::{
     DefaultTerminal, Frame,
@@ -119,12 +119,22 @@ struct Note {
 impl SerializableNote {
     /// Special method because parent can't be set
     fn part_into(self) -> Rc<RefCell<Note>> {
-        let note = Rc::new(RefCell::new(Note { created_at: self.created_at, edited_at: self.edited_at, data: self.data, status: self.status, children: vec![], parent: None}));
-        note.borrow_mut().children = self.children.iter().map(|v| {
-            let v = v.clone().part_into();
-            v.borrow_mut().parent = Some(note.clone());
-            v
-        })
+        let note = Rc::new(RefCell::new(Note {
+            created_at: self.created_at,
+            edited_at: self.edited_at,
+            data: self.data,
+            status: self.status,
+            children: vec![],
+            parent: None,
+        }));
+        note.borrow_mut().children = self
+            .children
+            .iter()
+            .map(|v| {
+                let v = v.clone().part_into();
+                v.borrow_mut().parent = Some(note.clone());
+                v
+            })
             .collect();
         note
     }
@@ -224,7 +234,11 @@ impl TryFrom<SerializableNotesContainer> for Vec<Rc<RefCell<Note>>> {
         if value.version != 0 {
             return Err(eyre!("invalid version"));
         }
-        Ok(value.root_notes.iter().map(|v| v.clone().part_into()).collect())
+        Ok(value
+            .root_notes
+            .iter()
+            .map(|v| v.clone().part_into())
+            .collect())
     }
 }
 
@@ -245,28 +259,23 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
 
     if std::fs::exists(data_dir.join("notes.ron"))? {
         match std::fs::read_to_string(data_dir.join("notes.ron")) {
-            Ok(data) => {
-                match ron::from_str::<SerializableNotesContainer>(&data) {
-                    Ok(out) => {
-                        status.root_notes = match out.try_into() {
-                            Ok(data) => data,
-                            Err(e) => {
-                                status.status_bar = Some(format!("Error with contents of notes: {}", e));
-                                vec![]
-                            },
-                        };
-                    },
-                    Err(e) => {
-                        status.status_bar = Some(format!("Error parsing notes: {}", e))
-                    },
+            Ok(data) => match ron::from_str::<SerializableNotesContainer>(&data) {
+                Ok(out) => {
+                    status.root_notes = match out.try_into() {
+                        Ok(data) => data,
+                        Err(e) => {
+                            status.status_bar =
+                                Some(format!("Error with contents of notes: {}", e));
+                            vec![]
+                        }
+                    };
                 }
-            }
-            Err(e) => {
-                status.status_bar = Some(format!("Error reading notes: {}", e))
-            }
+                Err(e) => status.status_bar = Some(format!("Error parsing notes: {}", e)),
+            },
+            Err(e) => status.status_bar = Some(format!("Error reading notes: {}", e)),
         }
     }
-    
+
     fn scroll_up(status: &mut Status) {
         let (ref parent, ref mut index) = status.selected_index;
         let siblings = parent
@@ -322,7 +331,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
         std::fs::write(data_dir.join("notes.ron"), data)?;
         status.status_bar = Some("Saved.".to_string());
         status.last_save = std::time::Instant::now();
-        
+
         Ok(())
     }
     loop {
@@ -336,13 +345,17 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                     Event::Key(ev) => {
                         if ev.is_press() || ev.is_repeat() {
                             match ev.code {
-                                event::KeyCode::Char('d') if ev.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                                    status.status_bar = Some(format!("{:#?}", status.last_save.elapsed()))
+                                event::KeyCode::Char('d')
+                                    if ev.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                                {
+                                    status.status_bar =
+                                        Some(format!("{:#?}", status.last_save.elapsed()))
                                 }
                                 event::KeyCode::Char('s')
-                                    if ev.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                                        save(&data_dir, &mut status)?;
-                                    }
+                                    if ev.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                                {
+                                    save(&data_dir, &mut status)?;
+                                }
                                 event::KeyCode::Char('q') => break Ok(()),
                                 event::KeyCode::Up => scroll_up(&mut status),
                                 event::KeyCode::Down => scroll_down(&mut status),
@@ -350,7 +363,8 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                     status.status_bar = None;
                                     if let Some(selected) = status.selected.clone() {
                                         status.selected_index = (Some(selected.clone()), 0);
-                                        status.selected = selected.borrow().children.first().cloned();
+                                        status.selected =
+                                            selected.borrow().children.first().cloned();
                                     }
                                 }
                                 event::KeyCode::Backspace | event::KeyCode::Left => {
@@ -389,7 +403,8 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                 event::KeyCode::Char('d') | event::KeyCode::Delete => {
                                     status.status_bar = None;
                                     if status.selected.is_some() {
-                                        status.current_dialog = Dialog::Deleting(DeletingInput::Cancel);
+                                        status.current_dialog =
+                                            Dialog::Deleting(DeletingInput::Cancel);
                                     }
                                 }
                                 _ => {}
@@ -448,103 +463,109 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                         }
                         _ => {}
                     },
-                    Dialog::Adding(ref mut inp, (ref mut data, ref mut note_status, ref mut loc))
-                    | Dialog::Editing(ref mut inp, (ref mut data, ref mut note_status, ref mut loc)) => {
-                        match ev.code {
-                            event::KeyCode::Char('q') if *inp != AddingInput::Data || ev.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                    Dialog::Adding(
+                        ref mut inp,
+                        (ref mut data, ref mut note_status, ref mut loc),
+                    )
+                    | Dialog::Editing(
+                        ref mut inp,
+                        (ref mut data, ref mut note_status, ref mut loc),
+                    ) => match ev.code {
+                        event::KeyCode::Char('q')
+                            if *inp != AddingInput::Data
+                                || ev.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
+                            status.current_dialog = Dialog::None;
+                        }
+                        event::KeyCode::Char(c) => {
+                            if *inp == AddingInput::Data {
+                                data.insert(*loc, c);
+                                *loc += 1
+                            }
+                        }
+                        event::KeyCode::Up => {
+                            if *inp == AddingInput::Status {
+                                *inp = AddingInput::Data
+                            } else if *inp == AddingInput::Submit {
+                                *inp = AddingInput::Status
+                            }
+                        }
+                        event::KeyCode::Down => {
+                            if *inp == AddingInput::Data {
+                                *inp = AddingInput::Status;
+                                *loc = data.len();
+                            } else if *inp == AddingInput::Status {
+                                *inp = AddingInput::Submit
+                            }
+                        }
+                        event::KeyCode::Left => {
+                            if *inp == AddingInput::Status {
+                                *note_status = note_status.prev()
+                            } else if *inp == AddingInput::Data {
+                                *loc = loc.saturating_sub(1)
+                            }
+                        }
+                        event::KeyCode::Right => {
+                            if *inp == AddingInput::Status {
+                                *note_status = note_status.next()
+                            } else if *inp == AddingInput::Data && *loc < data.len() {
+                                *loc += 1
+                            }
+                        }
+                        event::KeyCode::Backspace => {
+                            if *inp == AddingInput::Data {
+                                if *loc >= data.len() {
+                                    data.pop();
+                                } else if !data.is_empty() {
+                                    data.remove(*loc - 1);
+                                }
+                                *loc = loc.saturating_sub(1);
+                            }
+                        }
+                        event::KeyCode::Delete => {
+                            if *inp == AddingInput::Data && *loc < data.len() && !data.is_empty() {
+                                data.remove(*loc);
+                            }
+                        }
+                        event::KeyCode::Enter => {
+                            if *inp == AddingInput::Submit {
+                                if !data.is_empty() {
+                                    let data = data.clone();
+                                    let note_status = note_status.clone();
+                                    let t = OffsetDateTime::now_local()?;
+                                    if status.current_dialog.is_adding() {
+                                        let mut note_to_add = Note {
+                                            data,
+                                            created_at: t,
+                                            edited_at: t,
+                                            status: note_status,
+                                            children: vec![],
+                                            parent: None,
+                                        };
+                                        if let Some(add_to) = status.selected_index.0.as_ref() {
+                                            note_to_add.parent = Some(add_to.clone());
+                                            add_to
+                                                .borrow_mut()
+                                                .children
+                                                .push(Rc::new(RefCell::new(note_to_add)));
+                                        } else {
+                                            status
+                                                .root_notes
+                                                .push(Rc::new(RefCell::new(note_to_add)));
+                                        }
+                                    } else {
+                                        let selected = status.selected.as_ref().unwrap();
+                                        let mut edit = selected.borrow_mut();
+                                        edit.data = data;
+                                        edit.status = note_status;
+                                        edit.edited_at = t;
+                                    }
+                                }
                                 status.current_dialog = Dialog::None;
                             }
-                            event::KeyCode::Char(c) => {
-                                if *inp == AddingInput::Data {
-                                    data.insert(*loc, c);
-                                    *loc += 1
-                                }
-                            }
-                            event::KeyCode::Up => {
-                                if *inp == AddingInput::Status {
-                                    *inp = AddingInput::Data
-                                } else if *inp == AddingInput::Submit {
-                                    *inp = AddingInput::Status
-                                }
-                            }
-                            event::KeyCode::Down => {
-                                if *inp == AddingInput::Data {
-                                    *inp = AddingInput::Status;
-                                    *loc = data.len();
-                                } else if *inp == AddingInput::Status {
-                                    *inp = AddingInput::Submit
-                                }
-                            }
-                            event::KeyCode::Left => {
-                                if *inp == AddingInput::Status {
-                                    *note_status = note_status.prev()
-                                } else if *inp == AddingInput::Data {
-                                    *loc = loc.saturating_sub(1)
-                                }
-                            }
-                            event::KeyCode::Right => {
-                                if *inp == AddingInput::Status {
-                                    *note_status = note_status.next()
-                                } else if *inp == AddingInput::Data && *loc < data.len() {
-                                    *loc += 1
-                                }
-                            }
-                            event::KeyCode::Backspace => {
-                                if *inp == AddingInput::Data {
-                                    if *loc >= data.len() {
-                                        data.pop();
-                                    } else if !data.is_empty() {
-                                        data.remove(*loc - 1);
-                                    }
-                                    *loc = loc.saturating_sub(1);
-                                }
-                            }
-                            event::KeyCode::Delete => {
-                                if *inp == AddingInput::Data
-                                    && *loc < data.len() && !data.is_empty() {
-                                        data.remove(*loc);
-                                    }
-                            }
-                            event::KeyCode::Enter => {
-                                if *inp == AddingInput::Submit {
-                                    if !data.is_empty() {
-                                        let data = data.clone();
-                                        let note_status = note_status.clone();
-                                        let t = OffsetDateTime::now_local()?;
-                                        if status.current_dialog.is_adding() {
-                                            let mut note_to_add = Note {
-                                                data,
-                                                created_at: t,
-                                                edited_at: t,
-                                                status: note_status,
-                                                children: vec![],
-                                                parent: None,
-                                            };
-                                            if let Some(add_to) = status.selected_index.0.as_ref() {
-                                                note_to_add.parent = Some(add_to.clone());
-                                                add_to
-                                                    .borrow_mut()
-                                                    .children
-                                                    .push(Rc::new(RefCell::new(note_to_add)));
-                                            } else {
-                                                status
-                                                    .root_notes
-                                                    .push(Rc::new(RefCell::new(note_to_add)));
-                                            }
-                                        } else {
-                                            let selected = status.selected.as_ref().unwrap();
-                                            let mut edit = selected.borrow_mut();
-                                            edit.data = data;
-                                            edit.status = note_status;
-                                            edit.edited_at = t;
-                                        }
-                                    }
-                                    status.current_dialog = Dialog::None;
-                                }
-                            }
-                            _ => {}
                         }
-                    }
+                        _ => {}
+                    },
                     _ => {}
                 }
             }
@@ -573,11 +594,14 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                 let [_, cancel_area, _, confirm_area, _] = horiz.areas(button_area);
 
                 frame.render_widget(
-                    Block::bordered().red()
-                    .title(format!(
-                        "Really delete \"{}\"?",
-                        status.selected.as_ref().unwrap().borrow().data
-                    ).bold().into_centered_line()),
+                    Block::bordered().red().title(
+                        format!(
+                            "Really delete \"{}\"?",
+                            status.selected.as_ref().unwrap().borrow().data
+                        )
+                        .bold()
+                        .into_centered_line(),
+                    ),
                     dialog_area,
                 );
 
@@ -588,7 +612,8 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                     } else {
                         para
                     }
-                    .block(Block::bordered()).green(),
+                    .block(Block::bordered())
+                    .green(),
                     cancel_area,
                 );
 
@@ -671,16 +696,22 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                     title_area,
                 );
                 frame.render_widget(
-                    Block::new().borders(Borders::BOTTOM).title(
-                        if let Some(ref note) = status.selected {
+                    Block::new()
+                        .borders(Borders::BOTTOM)
+                        .title(if let Some(ref note) = status.selected {
                             status.status_bar = None;
                             let note = note.borrow();
                             format!(
                                 "{} - created at {}{}",
-                                color_eyre::owo_colors::OwoColorize::green(&note.status.to_string()),
-                                color_eyre::owo_colors::OwoColorize::blue(&note.created_at
-                                    .format(&time::format_description::well_known::Rfc2822)
-                                    .unwrap()),
+                                color_eyre::owo_colors::OwoColorize::green(
+                                    &note.status.to_string()
+                                ),
+                                color_eyre::owo_colors::OwoColorize::blue(
+                                    &note
+                                        .created_at
+                                        .format(&time::format_description::well_known::Rfc2822)
+                                        .unwrap()
+                                ),
                                 if note
                                     .created_at
                                     .format(&time::format_description::well_known::Rfc2822)
@@ -692,9 +723,14 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                                 {
                                     format!(
                                         "; last edited at {}",
-                                        color_eyre::owo_colors::OwoColorize::blue(&note.edited_at
-                                            .format(&time::format_description::well_known::Rfc2822)
-                                            .unwrap())
+                                        color_eyre::owo_colors::OwoColorize::blue(
+                                            &note
+                                                .edited_at
+                                                .format(
+                                                    &time::format_description::well_known::Rfc2822
+                                                )
+                                                .unwrap()
+                                        )
                                     )
                                 } else {
                                     String::new()
@@ -705,8 +741,8 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                         } else {
                             status.status_bar = None;
                             String::new()
-                        },
-                    ).red(),
+                        })
+                        .red(),
                     status_area,
                 );
                 let selected_fn = |v: &Rc<RefCell<Note>>| {
@@ -732,7 +768,10 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                     .iter()
                     .map(selected_fn),
                 );
-                frame.render_widget(note_list.block(Block::bordered().title("Notes")).green(), left_area);
+                frame.render_widget(
+                    note_list.block(Block::bordered().title("Notes")).green(),
+                    left_area,
+                );
 
                 if status.selected.is_some()
                     && !status
@@ -755,7 +794,9 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                             .map(selected_fn),
                     );
                     frame.render_widget(
-                        children_list.block(Block::bordered().title("Children")).cyan(),
+                        children_list
+                            .block(Block::bordered().title("Children"))
+                            .cyan(),
                         right_area,
                     );
                 } else if let Some(note) = status
@@ -789,7 +830,10 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                         lines += 1;
                     }
                     let tree = List::new(tree);
-                    frame.render_widget(tree.block(Block::bordered().title("Tree")).magenta(), right_area);
+                    frame.render_widget(
+                        tree.block(Block::bordered().title("Tree")).magenta(),
+                        right_area,
+                    );
                 }
             }
         }
