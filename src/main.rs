@@ -1,5 +1,16 @@
 //! Hierarchal Notes
-#![warn(missing_docs, clippy::missing_docs_in_private_items)]
+#![warn(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::allow_attributes_without_reason,
+    clippy::clone_on_ref_ptr,
+    clippy::create_dir,
+    clippy::default_numeric_fallback,
+    clippy::panic_in_result_fn,
+    clippy::unwrap_in_result,
+    clippy::get_unwrap
+)]
 
 use std::{cell::RefCell, fmt::Display, path::Path, rc::Rc};
 
@@ -8,7 +19,7 @@ use crossterm::event::{self, Event};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout},
-    style::Stylize,
+    style::Stylize as _,
     text::Text,
     widgets::{Block, Borders, List, Paragraph},
 };
@@ -47,18 +58,16 @@ impl NoteStatus {
             Self::Incomplete => Self::Begun,
             Self::Begun => Self::Fractional(0),
             Self::Fractional(_) => Self::Complete,
-            Self::Complete => Self::Incomplete,
-            Self::Custom(_) => Self::Incomplete,
+            Self::Complete | Self::Custom(_) => Self::Incomplete,
         }
     }
     /// Get the previous one of this
     fn prev(&self) -> Self {
         match self {
-            Self::Incomplete => Self::Complete,
+            Self::Incomplete | Self::Custom(_) => Self::Complete,
             Self::Begun => Self::Incomplete,
             Self::Fractional(_) => Self::Begun,
             Self::Complete => Self::Fractional(0),
-            Self::Custom(_) => Self::Complete,
         }
     }
 }
@@ -68,7 +77,9 @@ impl Display for NoteStatus {
         match self {
             NoteStatus::Incomplete => f.write_str("Incomplete"),
             NoteStatus::Begun => f.write_str("Begun"),
-            NoteStatus::Fractional(v) => f.write_fmt(format_args!("{}% done", *v as f64 / 10.0)),
+            NoteStatus::Fractional(v) => {
+                f.write_fmt(format_args!("{}% done", f64::from(*v) / 10.0))
+            }
             NoteStatus::Complete => f.write_str("Complete 🤩"),
             NoteStatus::Custom(v) => f.write_str(v),
         }
@@ -132,7 +143,7 @@ impl SerializableNote {
             .iter()
             .map(|v| {
                 let v = v.clone().part_into();
-                v.borrow_mut().parent = Some(note.clone());
+                v.borrow_mut().parent = Some(Rc::clone(&note));
                 v
             })
             .collect();
@@ -191,7 +202,7 @@ enum Dialog {
 }
 
 impl Dialog {
-    /// Matches Dialog::Adding.
+    /// Matches `Dialog::Adding`.
     fn is_adding(&self) -> bool {
         matches!(self, Self::Adding(_, _))
     }
@@ -210,6 +221,10 @@ struct Status {
     current_dialog: Dialog,
     /// Data to display in the status bar. Removed (set to None) after the user switches to something
     /// that displays a different status.
+    #[expect(
+        clippy::struct_field_names,
+        reason = "Status is used to mean two things here"
+    )]
     status_bar: Option<String>,
     /// The time of the last save.
     last_save: std::time::Instant,
@@ -243,39 +258,8 @@ impl TryFrom<SerializableNotesContainer> for Vec<Rc<RefCell<Note>>> {
 }
 
 /// Run the stuff
+#[expect(clippy::too_many_lines, reason = "I don't feel like refactoring this")]
 fn run(mut terminal: DefaultTerminal) -> Result<()> {
-    let mut status = Status {
-        root_notes: vec![],
-        selected: None,
-        selected_index: (None, 0),
-        current_dialog: Dialog::None,
-        status_bar: None,
-        last_save: std::time::Instant::now(),
-    };
-    let data_dir = dirs::data_dir().unwrap().join("notation");
-    if let Some(e) = std::fs::create_dir_all(&data_dir).err() {
-        status.status_bar = Some(format!("Error creating data directory: {}", e))
-    }
-
-    if std::fs::exists(data_dir.join("notes.ron"))? {
-        match std::fs::read_to_string(data_dir.join("notes.ron")) {
-            Ok(data) => match ron::from_str::<SerializableNotesContainer>(&data) {
-                Ok(out) => {
-                    status.root_notes = match out.try_into() {
-                        Ok(data) => data,
-                        Err(e) => {
-                            status.status_bar =
-                                Some(format!("Error with contents of notes: {}", e));
-                            vec![]
-                        }
-                    };
-                }
-                Err(e) => status.status_bar = Some(format!("Error parsing notes: {}", e)),
-            },
-            Err(e) => status.status_bar = Some(format!("Error reading notes: {}", e)),
-        }
-    }
-
     fn scroll_up(status: &mut Status) {
         let (ref parent, ref mut index) = status.selected_index;
         let siblings = parent
@@ -290,7 +274,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                 if status.selected.is_none() {
                     *index = siblings.len() - 1;
 
-                    status.selected = Some(siblings[*index].clone());
+                    status.selected = Some(Rc::clone(&siblings[*index]));
                 } else {
                     *index = 0;
                     status.selected = None;
@@ -298,7 +282,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
             } else {
                 *index = index.saturating_sub(1);
 
-                status.selected = Some(siblings[*index].clone());
+                status.selected = Some(Rc::clone(&siblings[*index]));
             }
         }
     }
@@ -317,7 +301,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
             if status.selected.is_some() {
                 *index += 1;
             }
-            status.selected = Some(siblings[*index].clone());
+            status.selected = Some(Rc::clone(&siblings[*index]));
         } else {
             *index = 0;
             status.selected = None;
@@ -334,6 +318,38 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
 
         Ok(())
     }
+
+    let mut status = Status {
+        root_notes: vec![],
+        selected: None,
+        selected_index: (None, 0),
+        current_dialog: Dialog::None,
+        status_bar: None,
+        last_save: std::time::Instant::now(),
+    };
+    let data_dir = dirs::data_dir().unwrap().join("notation");
+    if let Some(e) = std::fs::create_dir_all(&data_dir).err() {
+        status.status_bar = Some(format!("Error creating data directory: {e}"));
+    }
+
+    if std::fs::exists(data_dir.join("notes.ron"))? {
+        match std::fs::read_to_string(data_dir.join("notes.ron")) {
+            Ok(data) => match ron::from_str::<SerializableNotesContainer>(&data) {
+                Ok(out) => {
+                    status.root_notes = match out.try_into() {
+                        Ok(data) => data,
+                        Err(e) => {
+                            status.status_bar = Some(format!("Error with contents of notes: {e}"));
+                            vec![]
+                        }
+                    };
+                }
+                Err(e) => status.status_bar = Some(format!("Error parsing notes: {e}")),
+            },
+            Err(e) => status.status_bar = Some(format!("Error reading notes: {e}")),
+        }
+    }
+
     loop {
         if status.last_save.elapsed() >= std::time::Duration::from_secs(60) {
             save(&data_dir, &mut status)?;
@@ -345,12 +361,6 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                     Event::Key(ev) => {
                         if ev.is_press() || ev.is_repeat() {
                             match ev.code {
-                                event::KeyCode::Char('d')
-                                    if ev.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                                {
-                                    status.status_bar =
-                                        Some(format!("{:#?}", status.last_save.elapsed()))
-                                }
                                 event::KeyCode::Char('s')
                                     if ev.modifiers.contains(event::KeyModifiers::CONTROL) =>
                                 {
@@ -362,7 +372,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                 event::KeyCode::Enter | event::KeyCode::Right => {
                                     status.status_bar = None;
                                     if let Some(selected) = status.selected.clone() {
-                                        status.selected_index = (Some(selected.clone()), 0);
+                                        status.selected_index = (Some(Rc::clone(&selected)), 0);
                                         status.selected =
                                             selected.borrow().children.first().cloned();
                                     }
@@ -380,7 +390,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                                 .position(|v| *v == parent)
                                                 .unwrap(),
                                         );
-                                        status.selected = Some(parent.clone());
+                                        status.selected = Some(Rc::clone(&parent));
                                     }
                                 }
                                 event::KeyCode::Char('a') => {
@@ -413,9 +423,9 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                     }
                     Event::Mouse(ev) => {
                         if ev.kind.is_scroll_down() {
-                            scroll_down(&mut status)
+                            scroll_down(&mut status);
                         } else if ev.kind.is_scroll_up() {
-                            scroll_up(&mut status)
+                            scroll_up(&mut status);
                         }
                     }
                     _ => {}
@@ -450,12 +460,12 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                         }
                         event::KeyCode::Left => {
                             if *inp == DeletingInput::Confirm {
-                                *inp = DeletingInput::Cancel
+                                *inp = DeletingInput::Cancel;
                             }
                         }
                         event::KeyCode::Right => {
                             if *inp == DeletingInput::Cancel {
-                                *inp = DeletingInput::Confirm
+                                *inp = DeletingInput::Confirm;
                             }
                         }
                         event::KeyCode::Char('q') => {
@@ -480,14 +490,14 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                         event::KeyCode::Char(c) => {
                             if *inp == AddingInput::Data {
                                 data.insert(*loc, c);
-                                *loc += 1
+                                *loc += 1;
                             }
                         }
                         event::KeyCode::Up => {
                             if *inp == AddingInput::Status {
-                                *inp = AddingInput::Data
+                                *inp = AddingInput::Data;
                             } else if *inp == AddingInput::Submit {
-                                *inp = AddingInput::Status
+                                *inp = AddingInput::Status;
                             }
                         }
                         event::KeyCode::Down => {
@@ -495,21 +505,21 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                 *inp = AddingInput::Status;
                                 *loc = data.len();
                             } else if *inp == AddingInput::Status {
-                                *inp = AddingInput::Submit
+                                *inp = AddingInput::Submit;
                             }
                         }
                         event::KeyCode::Left => {
                             if *inp == AddingInput::Status {
-                                *note_status = note_status.prev()
+                                *note_status = note_status.prev();
                             } else if *inp == AddingInput::Data {
-                                *loc = loc.saturating_sub(1)
+                                *loc = loc.saturating_sub(1);
                             }
                         }
                         event::KeyCode::Right => {
                             if *inp == AddingInput::Status {
-                                *note_status = note_status.next()
+                                *note_status = note_status.next();
                             } else if *inp == AddingInput::Data && *loc < data.len() {
-                                *loc += 1
+                                *loc += 1;
                             }
                         }
                         event::KeyCode::Backspace => {
@@ -543,7 +553,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                             parent: None,
                                         };
                                         if let Some(add_to) = status.selected_index.0.as_ref() {
-                                            note_to_add.parent = Some(add_to.clone());
+                                            note_to_add.parent = Some(Rc::clone(add_to));
                                             add_to
                                                 .borrow_mut()
                                                 .children
@@ -566,7 +576,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                         }
                         _ => {}
                     },
-                    _ => {}
+                    Dialog::None => unreachable!(),
                 }
             }
         }
@@ -574,6 +584,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
 }
 
 /// Widgets!
+#[expect(clippy::too_many_lines, reason = "I don't feel like refactoring this")]
 fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
     |frame: &mut Frame| {
         use Constraint::{Fill, Length, Min, Ratio};
@@ -653,7 +664,7 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
 
                 let para = Paragraph::new(data.clone())
                     .left_aligned()
-                    .scroll((0, scroll as u16));
+                    .scroll((0, u16::try_from(scroll).unwrap()));
                 frame.render_widget(
                     if *inp == AddingInput::Data {
                         para.bold()
@@ -667,12 +678,13 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
 
                 if *inp == AddingInput::Data {
                     frame.set_cursor_position((
-                        data_area.x + 1 + loc as u16 - scroll as u16,
+                        data_area.x + 1 + u16::try_from(loc).unwrap()
+                            - u16::try_from(scroll).unwrap(),
                         data_area.y + 1,
                     ));
                 }
 
-                let para = Paragraph::new(format!("{}", note_status)).centered();
+                let para = Paragraph::new(format!("{note_status}")).centered();
                 frame.render_widget(
                     if *inp == AddingInput::Status {
                         para.bold()
@@ -727,11 +739,13 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                                     .created_at
                                     .format(&time::format_description::well_known::Rfc2822)
                                     .unwrap()
-                                    != note
+                                    == note
                                         .edited_at
                                         .format(&time::format_description::well_known::Rfc2822)
                                         .unwrap()
                                 {
+                                    String::new()
+                                } else {
                                     format!(
                                         "; last edited at {}",
                                         color_eyre::owo_colors::OwoColorize::blue(
@@ -743,8 +757,6 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                                                 .unwrap()
                                         )
                                     )
-                                } else {
-                                    String::new()
                                 }
                             )
                         } else if let Some(status_bar) = status.status_bar.clone() {
@@ -759,7 +771,7 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                 let selected_fn = |v: &Rc<RefCell<Note>>| {
                     let mut data = Text::raw(v.borrow().data.clone());
                     if status.selected.as_ref().is_some_and(|v2| *v2 == *v) {
-                        data = data.reversed()
+                        data = data.reversed();
                     }
                     data
                 };
@@ -794,11 +806,7 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                         .is_empty()
                 {
                     let children_list = List::new(
-                        status
-                            .selected
-                            .as_ref()
-                            .unwrap()
-                            .clone()
+                        Rc::clone(status.selected.as_ref().unwrap())
                             .borrow()
                             .children
                             .iter()
@@ -815,7 +823,7 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                     .as_ref()
                     .or(status.selected_index.0.as_ref())
                 {
-                    let mut current_note = note.clone();
+                    let mut current_note = Rc::clone(note);
 
                     let mut tree = Vec::new();
                     let mut lines = 0usize;
@@ -837,7 +845,7 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                             break;
                         }
 
-                        current_note = current_note.clone().borrow().parent.clone().unwrap();
+                        current_note = Rc::clone(&current_note).borrow().parent.clone().unwrap();
                         lines += 1;
                     }
                     let tree = List::new(tree);
