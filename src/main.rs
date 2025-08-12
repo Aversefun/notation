@@ -443,12 +443,15 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                 *inp = DeletingInput::Confirm
                             }
                         }
+                        event::KeyCode::Char('q') => {
+                            status.current_dialog = Dialog::None;
+                        }
                         _ => {}
                     },
                     Dialog::Adding(ref mut inp, (ref mut data, ref mut note_status, ref mut loc))
                     | Dialog::Editing(ref mut inp, (ref mut data, ref mut note_status, ref mut loc)) => {
                         match ev.code {
-                            event::KeyCode::Char('q') if *inp != AddingInput::Data => {
+                            event::KeyCode::Char('q') if *inp != AddingInput::Data || ev.modifiers.contains(event::KeyModifiers::CONTROL) => {
                                 status.current_dialog = Dialog::None;
                             }
                             event::KeyCode::Char(c) => {
@@ -495,6 +498,12 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                     }
                                     *loc = loc.saturating_sub(1);
                                 }
+                            }
+                            event::KeyCode::Delete => {
+                                if *inp == AddingInput::Data
+                                    && *loc < data.len() && !data.is_empty() {
+                                        data.remove(*loc);
+                                    }
                             }
                             event::KeyCode::Enter => {
                                 if *inp == AddingInput::Submit {
@@ -553,23 +562,23 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                 let vertical = Layout::vertical([Fill(1), Min(12), Fill(1)]);
                 let [_, dialog_area, _] = vertical.areas(frame.area());
 
-                let input = Layout::vertical([Length(1), Length(1), Length(3)]);
-                let [text_area, _, button_area] = input.areas(dialog_area);
+                let horiz_dialog = Layout::horizontal([Fill(1), Min(18), Fill(1)]);
+                let [_, dialog_area, _] = horiz_dialog.areas(dialog_area);
+
+                let input = Layout::vertical([Fill(1), Length(3), Fill(2)]);
+                let [_, button_area, _] = input.areas(dialog_area);
 
                 let horiz =
                     Layout::horizontal([Fill(1), Length(8), Ratio(1, 4), Length(9), Fill(1)]);
                 let [_, cancel_area, _, confirm_area, _] = horiz.areas(button_area);
 
-                frame.render_widget(Block::bordered(), dialog_area);
-
                 frame.render_widget(
-                    Paragraph::new(format!(
+                    Block::bordered().red()
+                    .title(format!(
                         "Really delete \"{}\"?",
                         status.selected.as_ref().unwrap().borrow().data
-                    ))
-                    .bold()
-                    .centered(),
-                    text_area,
+                    ).bold().into_centered_line()),
+                    dialog_area,
                 );
 
                 let para = Paragraph::new("Cancel").centered();
@@ -579,7 +588,7 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                     } else {
                         para
                     }
-                    .block(Block::bordered()),
+                    .block(Block::bordered()).green(),
                     cancel_area,
                 );
 
@@ -590,7 +599,8 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                     } else {
                         para
                     }
-                    .block(Block::bordered()),
+                    .block(Block::bordered())
+                    .red(),
                     confirm_area,
                 );
             }
@@ -606,8 +616,9 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                 let horiz = Layout::horizontal([Ratio(3, 8), Ratio(1, 4), Ratio(3, 8)]);
                 let [_, data_area, _] = horiz.areas(data_area);
                 let [_, status_area, _] = horiz.areas(status_area);
+                let [_, submit_area, _] = horiz.areas(submit_area);
 
-                frame.render_widget(Block::bordered(), dialog_area);
+                frame.render_widget(Block::bordered().yellow(), dialog_area);
 
                 let para = Paragraph::new(data.clone()).left_aligned();
                 frame.render_widget(
@@ -616,7 +627,8 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                     } else {
                         para
                     }
-                    .block(Block::bordered().title("Note")),
+                    .block(Block::bordered().title("Note"))
+                    .blue(),
                     data_area,
                 );
 
@@ -631,7 +643,8 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                     } else {
                         para
                     }
-                    .block(Block::bordered().title("Status")),
+                    .block(Block::bordered().title("Status"))
+                    .green(),
                     status_area,
                 );
 
@@ -642,7 +655,8 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                     } else {
                         para
                     }
-                    .block(Block::bordered()),
+                    .block(Block::bordered())
+                    .magenta(),
                     submit_area,
                 );
             }
