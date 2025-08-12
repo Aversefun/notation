@@ -16,6 +16,9 @@
 - [Ctrl+]Q - Exit back to default mode
 - Arrow keys, backspace, delete, enter - self-explanatory
 
+To submit a note, use the down arrow key to select the submit button and then
+press enter.
+
 ## Deleting mode
 
 - Q - Exit back to default mode
