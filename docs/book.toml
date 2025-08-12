@@ -1,0 +1,5 @@
+[book]
+authors = ["Arthur Beck"]
+language = "en"
+src = "src"
+title = "Notation Documentation"
