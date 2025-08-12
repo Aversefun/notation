@@ -645,7 +645,15 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
 
                 frame.render_widget(Block::bordered().yellow(), dialog_area);
 
-                let para = Paragraph::new(data.clone()).left_aligned();
+                let max_text_size = data_area.width - 3;
+                let scroll = data
+                    .len()
+                    .saturating_sub(max_text_size as usize)
+                    .saturating_sub(data.len() - loc);
+
+                let para = Paragraph::new(data.clone())
+                    .left_aligned()
+                    .scroll((0, scroll as u16));
                 frame.render_widget(
                     if *inp == AddingInput::Data {
                         para.bold()
@@ -658,7 +666,10 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                 );
 
                 if *inp == AddingInput::Data {
-                    frame.set_cursor_position((data_area.x + 1 + loc as u16, data_area.y + 1));
+                    frame.set_cursor_position((
+                        data_area.x + 1 + loc as u16 - scroll as u16,
+                        data_area.y + 1,
+                    ));
                 }
 
                 let para = Paragraph::new(format!("{}", note_status)).centered();
