@@ -1,7 +1,7 @@
 //! Hierarchal Notes
 #![warn(missing_docs, clippy::missing_docs_in_private_items)]
 
-use std::{cell::RefCell, fmt::Display, rc::Rc};
+use std::{cell::RefCell, fmt::Display, path::Path, rc::Rc};
 
 use color_eyre::{eyre::eyre, Result};
 use crossterm::event::{self, Event};
@@ -201,6 +201,8 @@ struct Status {
     /// Data to display in the status bar. Removed (set to None) after the user switches to something
     /// that displays a different status.
     status_bar: Option<String>,
+    /// The time of the last save.
+    last_save: std::time::Instant,
 }
 
 impl From<&Status> for SerializableNotesContainer {
@@ -234,6 +236,7 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
         selected_index: (None, 0),
         current_dialog: Dialog::None,
         status_bar: None,
+        last_save: std::time::Instant::now(),
     };
     let data_dir = dirs::data_dir().unwrap().join("notation");
     if let Some(e) = std::fs::create_dir_all(&data_dir).err() {
@@ -311,216 +314,230 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
             status.selected = None;
         }
     }
+    fn save(data_dir: &Path, status: &mut Status) -> Result<()> {
+        let serializable: SerializableNotesContainer = (&*status).into();
+
+        let data = ron::to_string(&serializable)?;
+
+        std::fs::write(data_dir.join("notes.ron"), data)?;
+        status.status_bar = Some("Saved.".to_string());
+        status.last_save = std::time::Instant::now();
+        
+        Ok(())
+    }
     loop {
+        if status.last_save.elapsed() >= std::time::Duration::from_secs(60) {
+            save(&data_dir, &mut status)?;
+        }
         terminal.draw(render(&mut status))?;
-        if status.current_dialog == Dialog::None {
-            match event::read()? {
-                Event::Key(ev) => {
-                    if ev.is_press() || ev.is_repeat() {
-                        match ev.code {
-                            event::KeyCode::Char('s')
-                                if ev.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                                    let serializable: SerializableNotesContainer = (&status).into();
-
-                                    let data = ron::to_string(&serializable)?;
-
-                                    std::fs::write(data_dir.join("notes.ron"), data)?;
-                                    status.status_bar = Some("Saved.".to_string())
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if status.current_dialog == Dialog::None {
+                match event::read()? {
+                    Event::Key(ev) => {
+                        if ev.is_press() || ev.is_repeat() {
+                            match ev.code {
+                                event::KeyCode::Char('d') if ev.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                                    status.status_bar = Some(format!("{:#?}", status.last_save.elapsed()))
                                 }
-                            event::KeyCode::Char('q') => break Ok(()),
-                            event::KeyCode::Up => scroll_up(&mut status),
-                            event::KeyCode::Down => scroll_down(&mut status),
-                            event::KeyCode::Enter | event::KeyCode::Right => {
-                                status.status_bar = None;
-                                if let Some(selected) = status.selected.clone() {
-                                    status.selected_index = (Some(selected.clone()), 0);
-                                    status.selected = selected.borrow().children.first().cloned();
+                                event::KeyCode::Char('s')
+                                    if ev.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                                        save(&data_dir, &mut status)?;
+                                    }
+                                event::KeyCode::Char('q') => break Ok(()),
+                                event::KeyCode::Up => scroll_up(&mut status),
+                                event::KeyCode::Down => scroll_down(&mut status),
+                                event::KeyCode::Enter | event::KeyCode::Right => {
+                                    status.status_bar = None;
+                                    if let Some(selected) = status.selected.clone() {
+                                        status.selected_index = (Some(selected.clone()), 0);
+                                        status.selected = selected.borrow().children.first().cloned();
+                                    }
                                 }
-                            }
-                            event::KeyCode::Backspace | event::KeyCode::Left => {
-                                status.status_bar = None;
-                                if let Some(parent) = status.selected_index.0 {
-                                    let parentparent = parent.borrow().parent.clone();
-                                    status.selected_index = (
-                                        parentparent.clone(),
-                                        parentparent
-                                            .map(|v| v.borrow().children.clone())
-                                            .unwrap_or(status.root_notes.clone())
-                                            .iter()
-                                            .position(|v| *v == parent)
-                                            .unwrap(),
-                                    );
-                                    status.selected = Some(parent.clone());
+                                event::KeyCode::Backspace | event::KeyCode::Left => {
+                                    status.status_bar = None;
+                                    if let Some(parent) = status.selected_index.0 {
+                                        let parentparent = parent.borrow().parent.clone();
+                                        status.selected_index = (
+                                            parentparent.clone(),
+                                            parentparent
+                                                .map(|v| v.borrow().children.clone())
+                                                .unwrap_or(status.root_notes.clone())
+                                                .iter()
+                                                .position(|v| *v == parent)
+                                                .unwrap(),
+                                        );
+                                        status.selected = Some(parent.clone());
+                                    }
                                 }
-                            }
-                            event::KeyCode::Char('a') => {
-                                status.status_bar = None;
-                                status.current_dialog = Dialog::Adding(
-                                    AddingInput::Data,
-                                    (String::new(), NoteStatus::Incomplete, 0),
-                                );
-                            }
-                            event::KeyCode::Char('e') => {
-                                status.status_bar = None;
-                                if let Some(ref selected) = status.selected {
-                                    let selected = selected.borrow();
-                                    status.current_dialog = Dialog::Editing(
+                                event::KeyCode::Char('a') => {
+                                    status.status_bar = None;
+                                    status.current_dialog = Dialog::Adding(
                                         AddingInput::Data,
-                                        (selected.data.clone(), selected.status.clone(), 0),
+                                        (String::new(), NoteStatus::Incomplete, 0),
                                     );
                                 }
+                                event::KeyCode::Char('e') => {
+                                    status.status_bar = None;
+                                    if let Some(ref selected) = status.selected {
+                                        let selected = selected.borrow();
+                                        status.current_dialog = Dialog::Editing(
+                                            AddingInput::Data,
+                                            (selected.data.clone(), selected.status.clone(), 0),
+                                        );
+                                    }
+                                }
+                                event::KeyCode::Char('d') | event::KeyCode::Delete => {
+                                    status.status_bar = None;
+                                    if status.selected.is_some() {
+                                        status.current_dialog = Dialog::Deleting(DeletingInput::Cancel);
+                                    }
+                                }
+                                _ => {}
                             }
-                            event::KeyCode::Char('d') | event::KeyCode::Delete => {
-                                status.status_bar = None;
-                                if status.selected.is_some() {
-                                    status.current_dialog = Dialog::Deleting(DeletingInput::Cancel);
+                        }
+                    }
+                    Event::Mouse(ev) => {
+                        if ev.kind.is_scroll_down() {
+                            scroll_down(&mut status)
+                        } else if ev.kind.is_scroll_up() {
+                            scroll_up(&mut status)
+                        }
+                    }
+                    _ => {}
+                }
+            } else if let Event::Key(ev) = event::read()?
+                && (ev.is_press() || ev.is_repeat())
+            {
+                match status.current_dialog {
+                    Dialog::Deleting(ref mut inp) => match ev.code {
+                        event::KeyCode::Enter | event::KeyCode::Char(' ') => {
+                            if *inp == DeletingInput::Confirm {
+                                let selection = status.selected.take().unwrap();
+                                if let Some(parent) = &selection.borrow().parent {
+                                    let pos = parent
+                                        .borrow()
+                                        .children
+                                        .iter()
+                                        .position(|v| *v == selection)
+                                        .unwrap();
+                                    parent.borrow_mut().children.remove(pos);
+                                } else {
+                                    let pos = status
+                                        .root_notes
+                                        .iter()
+                                        .position(|v| *v == selection)
+                                        .unwrap();
+                                    status.root_notes.remove(pos);
+                                }
+                                scroll_up(&mut status);
+                            }
+                            status.current_dialog = Dialog::None;
+                        }
+                        event::KeyCode::Left => {
+                            if *inp == DeletingInput::Confirm {
+                                *inp = DeletingInput::Cancel
+                            }
+                        }
+                        event::KeyCode::Right => {
+                            if *inp == DeletingInput::Cancel {
+                                *inp = DeletingInput::Confirm
+                            }
+                        }
+                        _ => {}
+                    },
+                    Dialog::Adding(ref mut inp, (ref mut data, ref mut note_status, ref mut loc))
+                    | Dialog::Editing(ref mut inp, (ref mut data, ref mut note_status, ref mut loc)) => {
+                        match ev.code {
+                            event::KeyCode::Char('q') if *inp != AddingInput::Data => {
+                                status.current_dialog = Dialog::None;
+                            }
+                            event::KeyCode::Char(c) => {
+                                if *inp == AddingInput::Data {
+                                    data.insert(*loc, c);
+                                    *loc += 1
+                                }
+                            }
+                            event::KeyCode::Up => {
+                                if *inp == AddingInput::Status {
+                                    *inp = AddingInput::Data
+                                } else if *inp == AddingInput::Submit {
+                                    *inp = AddingInput::Status
+                                }
+                            }
+                            event::KeyCode::Down => {
+                                if *inp == AddingInput::Data {
+                                    *inp = AddingInput::Status;
+                                    *loc = data.len();
+                                } else if *inp == AddingInput::Status {
+                                    *inp = AddingInput::Submit
+                                }
+                            }
+                            event::KeyCode::Left => {
+                                if *inp == AddingInput::Status {
+                                    *note_status = note_status.prev()
+                                } else if *inp == AddingInput::Data {
+                                    *loc = loc.saturating_sub(1)
+                                }
+                            }
+                            event::KeyCode::Right => {
+                                if *inp == AddingInput::Status {
+                                    *note_status = note_status.next()
+                                } else if *inp == AddingInput::Data && *loc < data.len() {
+                                    *loc += 1
+                                }
+                            }
+                            event::KeyCode::Backspace => {
+                                if *inp == AddingInput::Data {
+                                    if *loc >= data.len() {
+                                        data.pop();
+                                    } else if !data.is_empty() {
+                                        data.remove(*loc - 1);
+                                    }
+                                    *loc = loc.saturating_sub(1);
+                                }
+                            }
+                            event::KeyCode::Enter => {
+                                if *inp == AddingInput::Submit {
+                                    if !data.is_empty() {
+                                        let data = data.clone();
+                                        let note_status = note_status.clone();
+                                        let t = OffsetDateTime::now_local()?;
+                                        if status.current_dialog.is_adding() {
+                                            let mut note_to_add = Note {
+                                                data,
+                                                created_at: t,
+                                                edited_at: t,
+                                                status: note_status,
+                                                children: vec![],
+                                                parent: None,
+                                            };
+                                            if let Some(add_to) = status.selected_index.0.as_ref() {
+                                                note_to_add.parent = Some(add_to.clone());
+                                                add_to
+                                                    .borrow_mut()
+                                                    .children
+                                                    .push(Rc::new(RefCell::new(note_to_add)));
+                                            } else {
+                                                status
+                                                    .root_notes
+                                                    .push(Rc::new(RefCell::new(note_to_add)));
+                                            }
+                                        } else {
+                                            let selected = status.selected.as_ref().unwrap();
+                                            let mut edit = selected.borrow_mut();
+                                            edit.data = data;
+                                            edit.status = note_status;
+                                            edit.edited_at = t;
+                                        }
+                                    }
+                                    status.current_dialog = Dialog::None;
                                 }
                             }
                             _ => {}
                         }
                     }
-                }
-                Event::Mouse(ev) => {
-                    if ev.kind.is_scroll_down() {
-                        scroll_down(&mut status)
-                    } else if ev.kind.is_scroll_up() {
-                        scroll_up(&mut status)
-                    }
-                }
-                _ => {}
-            }
-        } else if let Event::Key(ev) = event::read()?
-            && (ev.is_press() || ev.is_repeat())
-        {
-            match status.current_dialog {
-                Dialog::Deleting(ref mut inp) => match ev.code {
-                    event::KeyCode::Enter | event::KeyCode::Char(' ') => {
-                        if *inp == DeletingInput::Confirm {
-                            let selection = status.selected.take().unwrap();
-                            if let Some(parent) = &selection.borrow().parent {
-                                let pos = parent
-                                    .borrow()
-                                    .children
-                                    .iter()
-                                    .position(|v| *v == selection)
-                                    .unwrap();
-                                parent.borrow_mut().children.remove(pos);
-                            } else {
-                                let pos = status
-                                    .root_notes
-                                    .iter()
-                                    .position(|v| *v == selection)
-                                    .unwrap();
-                                status.root_notes.remove(pos);
-                            }
-                            scroll_up(&mut status);
-                        }
-                        status.current_dialog = Dialog::None;
-                    }
-                    event::KeyCode::Left => {
-                        if *inp == DeletingInput::Confirm {
-                            *inp = DeletingInput::Cancel
-                        }
-                    }
-                    event::KeyCode::Right => {
-                        if *inp == DeletingInput::Cancel {
-                            *inp = DeletingInput::Confirm
-                        }
-                    }
                     _ => {}
-                },
-                Dialog::Adding(ref mut inp, (ref mut data, ref mut note_status, ref mut loc))
-                | Dialog::Editing(ref mut inp, (ref mut data, ref mut note_status, ref mut loc)) => {
-                    match ev.code {
-                        event::KeyCode::Char('q') if *inp != AddingInput::Data => {
-                            status.current_dialog = Dialog::None;
-                        }
-                        event::KeyCode::Char(c) => {
-                            if *inp == AddingInput::Data {
-                                data.insert(*loc, c);
-                                *loc += 1
-                            }
-                        }
-                        event::KeyCode::Up => {
-                            if *inp == AddingInput::Status {
-                                *inp = AddingInput::Data
-                            } else if *inp == AddingInput::Submit {
-                                *inp = AddingInput::Status
-                            }
-                        }
-                        event::KeyCode::Down => {
-                            if *inp == AddingInput::Data {
-                                *inp = AddingInput::Status;
-                                *loc = data.len();
-                            } else if *inp == AddingInput::Status {
-                                *inp = AddingInput::Submit
-                            }
-                        }
-                        event::KeyCode::Left => {
-                            if *inp == AddingInput::Status {
-                                *note_status = note_status.prev()
-                            } else if *inp == AddingInput::Data {
-                                *loc = loc.saturating_sub(1)
-                            }
-                        }
-                        event::KeyCode::Right => {
-                            if *inp == AddingInput::Status {
-                                *note_status = note_status.next()
-                            } else if *inp == AddingInput::Data && *loc < data.len() {
-                                *loc += 1
-                            }
-                        }
-                        event::KeyCode::Backspace => {
-                            if *inp == AddingInput::Data {
-                                if *loc >= data.len() {
-                                    data.pop();
-                                } else {
-                                    data.remove(*loc - 1);
-                                }
-                                *loc -= 1
-                            }
-                        }
-                        event::KeyCode::Enter => {
-                            if *inp == AddingInput::Submit {
-                                if !data.is_empty() {
-                                    let data = data.clone();
-                                    let note_status = note_status.clone();
-                                    let t = OffsetDateTime::now_local()?;
-                                    if status.current_dialog.is_adding() {
-                                        let mut note_to_add = Note {
-                                            data,
-                                            created_at: t,
-                                            edited_at: t,
-                                            status: note_status,
-                                            children: vec![],
-                                            parent: None,
-                                        };
-                                        if let Some(add_to) = status.selected_index.0.as_ref() {
-                                            note_to_add.parent = Some(add_to.clone());
-                                            add_to
-                                                .borrow_mut()
-                                                .children
-                                                .push(Rc::new(RefCell::new(note_to_add)));
-                                        } else {
-                                            status
-                                                .root_notes
-                                                .push(Rc::new(RefCell::new(note_to_add)));
-                                        }
-                                    } else {
-                                        let selected = status.selected.as_ref().unwrap();
-                                        let mut edit = selected.borrow_mut();
-                                        edit.data = data;
-                                        edit.status = note_status;
-                                        edit.edited_at = t;
-                                    }
-                                }
-                                status.current_dialog = Dialog::None;
-                            }
-                        }
-                        _ => {}
-                    }
                 }
-                _ => {}
             }
         }
     }
