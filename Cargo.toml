@@ -1,13 +1,24 @@
 [package]
 name = "notation"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 
 [dependencies]
+btleplug = { version = "0.11.8", optional = true }
 color-eyre = "0.6.5"
 crossterm = "0.29.0"
 dirs = "6.0.0"
+fontdue = { version = "0.9.3", optional = true, features = ["std"] }
 ratatui = "0.29.0"
 ron = "0.10.1"
+rustpython = { version = "0.4.0", optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
+smol = { version = "2.0.2", optional = true }
 time = { version = "0.3.41", features = ["formatting", "local-offset", "serde"] }
+uuid = { version = "1.18.0", optional = true }
+
+[features]
+default = ["cat_printer"]
+cat_printer = ["dep:btleplug", "dep:uuid", "async", "fonts"]
+async = ["dep:smol"]
+fonts = ["dep:fontdue"]

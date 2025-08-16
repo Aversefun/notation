@@ -12,6 +12,8 @@
     clippy::get_unwrap
 )]
 
+#[cfg(feature = "cat_printer")]
+use std::time::Duration;
 use std::{cell::RefCell, fmt::Display, path::Path, rc::Rc};
 
 use color_eyre::{Result, eyre::eyre};
@@ -24,6 +26,12 @@ use ratatui::{
     widgets::{Block, Borders, List, Paragraph},
 };
 use time::OffsetDateTime;
+
+#[cfg(feature = "cat_printer")]
+mod cat_printer;
+
+#[cfg(feature = "fonts")]
+mod fonts;
 
 /// The version for storing data.
 const DATA_VERSION: u16 = 0;
@@ -209,7 +217,7 @@ impl Dialog {
 }
 
 /// The current status of the app.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct Status {
     /// The root-level notes.
     root_notes: Vec<Rc<RefCell<Note>>>,
@@ -228,6 +236,14 @@ struct Status {
     status_bar: Option<String>,
     /// The time of the last save.
     last_save: std::time::Instant,
+    /// The cat printer controller thingy.
+    #[cfg(feature = "cat_printer")]
+    printer: Option<cat_printer::Printer>,
+    /// The time of the last scan for a printer.
+    #[cfg(feature = "cat_printer")]
+    last_printer_scan: std::time::Instant,
+    /// If moving a note, the note being moved. If the bool is true, then it's copying not moving.
+    to_move: Option<(Rc<RefCell<Note>>, bool)>,
 }
 
 impl From<&Status> for SerializableNotesContainer {
@@ -326,6 +342,11 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
         current_dialog: Dialog::None,
         status_bar: None,
         last_save: std::time::Instant::now(),
+        #[cfg(feature = "cat_printer")]
+        printer: None,
+        #[cfg(feature = "cat_printer")]
+        last_printer_scan: std::time::Instant::now(),
+        to_move: None,
     };
     let data_dir = dirs::data_dir().unwrap().join("notation");
     if let Some(e) = std::fs::create_dir_all(&data_dir).err() {
@@ -355,6 +376,15 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
             save(&data_dir, &mut status)?;
         }
         terminal.draw(render(&mut status))?;
+        #[cfg(feature = "cat_printer")]
+        if let Some(printer) = status.printer.as_mut()
+            && !printer.found()
+            && status.last_printer_scan.elapsed() >= Duration::from_secs(1)
+            && !smol::block_on(printer.search()).unwrap()
+        {
+            status.status_bar = Some("Searching for printers...".to_string());
+            status.last_printer_scan = std::time::Instant::now();
+        }
         if event::poll(std::time::Duration::from_millis(100))? {
             if status.current_dialog == Dialog::None {
                 match event::read()? {
@@ -365,6 +395,27 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                     if ev.modifiers.contains(event::KeyModifiers::CONTROL) =>
                                 {
                                     save(&data_dir, &mut status)?;
+                                }
+                                #[cfg(feature = "cat_printer")]
+                                event::KeyCode::Char('p')
+                                    if ev.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                                {
+                                    if let Some(printer) = status.printer.as_mut()
+                                        && let Some(selected) = status.selected.clone()
+                                    {
+                                        smol::block_on(printer.print(selected.borrow().clone()))
+                                            .unwrap();
+                                        status.status_bar = Some("Printing...".to_string());
+                                    } else {
+                                        let (printer, found) =
+                                            smol::block_on(cat_printer::Printer::new()).unwrap();
+                                        status.printer = Some(printer);
+                                        if !found {
+                                            status.status_bar =
+                                                Some("Searching for printers...".to_string());
+                                            status.last_printer_scan = std::time::Instant::now();
+                                        }
+                                    }
                                 }
                                 event::KeyCode::Char('q') => break Ok(()),
                                 event::KeyCode::Up => scroll_up(&mut status),
@@ -410,11 +461,98 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                                         );
                                     }
                                 }
-                                event::KeyCode::Char('d') | event::KeyCode::Delete => {
+                                event::KeyCode::Char('d')
+                                    if ev.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                                {
+                                    status.status_bar = None;
+                                    if let Some(ref selected) = status.selected {
+                                        let mut note_to_add = selected.borrow().clone();
+                                        let t = OffsetDateTime::now_local()?;
+                                        note_to_add.created_at = t;
+                                        note_to_add.edited_at = t;
+                                        if let Some(add_to) = status.selected_index.0.as_ref() {
+                                            note_to_add.parent = Some(Rc::clone(add_to));
+                                            add_to.borrow_mut().children.insert(
+                                                status.selected_index.1,
+                                                Rc::new(RefCell::new(note_to_add)),
+                                            );
+                                        } else {
+                                            status.root_notes.insert(
+                                                status.selected_index.1,
+                                                Rc::new(RefCell::new(note_to_add)),
+                                            );
+                                        }
+                                        scroll_down(&mut status);
+                                    }
+                                }
+                                event::KeyCode::Delete => {
                                     status.status_bar = None;
                                     if status.selected.is_some() {
                                         status.current_dialog =
                                             Dialog::Deleting(DeletingInput::Cancel);
+                                    }
+                                }
+                                event::KeyCode::Char('x') => {
+                                    if let Some(ref selected) = status.selected {
+                                        status.to_move = Some((Rc::clone(selected), false));
+                                        status.status_bar = Some("Cut.".to_string());
+                                    }
+                                }
+                                event::KeyCode::Char('c') => {
+                                    if let Some(ref selected) = status.selected {
+                                        status.to_move = Some((Rc::clone(selected), true));
+                                        status.status_bar = Some("Copied.".to_string());
+                                    }
+                                }
+                                event::KeyCode::Char('v') => {
+                                    if let Some((selection, copy)) = status.to_move.take() {
+                                        let t = OffsetDateTime::now_local()?;
+                                        if copy {
+                                            selection.borrow_mut().created_at = t;
+                                        }
+                                        selection.borrow_mut().edited_at = t;
+                                        let same_parent =
+                                            selection.borrow().parent != status.selected_index.0;
+
+                                        if let Some(parent) = &selection.borrow().parent
+                                            && !copy
+                                            && !same_parent
+                                        {
+                                            let pos = parent
+                                                .borrow()
+                                                .children
+                                                .iter()
+                                                .position(|v| *v == selection)
+                                                .unwrap();
+                                            parent.borrow_mut().children.remove(pos);
+                                        } else if !copy && !same_parent {
+                                            let pos = status
+                                                .root_notes
+                                                .iter()
+                                                .position(|v| *v == selection)
+                                                .unwrap();
+                                            status.root_notes.remove(pos);
+                                        }
+
+                                        if let Some(ref new_parent) = status.selected_index.0 {
+                                            if !same_parent {
+                                                selection.borrow_mut().parent =
+                                                    Some(Rc::clone(new_parent));
+                                            }
+                                            new_parent.borrow_mut().children.insert(
+                                                status.selected_index.1,
+                                                Rc::clone(&selection),
+                                            );
+                                        } else {
+                                            if !same_parent {
+                                                selection.borrow_mut().parent = None;
+                                            }
+                                            status.root_notes.insert(
+                                                status.selected_index.1,
+                                                Rc::clone(&selection),
+                                            );
+                                        }
+                                        scroll_down(&mut status);
                                     }
                                 }
                                 _ => {}
@@ -538,41 +676,41 @@ fn run(mut terminal: DefaultTerminal) -> Result<()> {
                             }
                         }
                         event::KeyCode::Enter => {
-                            if *inp == AddingInput::Submit {
-                                if !data.is_empty() {
-                                    let data = data.clone();
-                                    let note_status = note_status.clone();
-                                    let t = OffsetDateTime::now_local()?;
-                                    if status.current_dialog.is_adding() {
-                                        let mut note_to_add = Note {
-                                            data,
-                                            created_at: t,
-                                            edited_at: t,
-                                            status: note_status,
-                                            children: vec![],
-                                            parent: None,
-                                        };
-                                        if let Some(add_to) = status.selected_index.0.as_ref() {
-                                            note_to_add.parent = Some(Rc::clone(add_to));
-                                            add_to
-                                                .borrow_mut()
-                                                .children
-                                                .push(Rc::new(RefCell::new(note_to_add)));
-                                        } else {
-                                            status
-                                                .root_notes
-                                                .push(Rc::new(RefCell::new(note_to_add)));
-                                        }
+                            if !data.is_empty() {
+                                let data = data.clone();
+                                let note_status = note_status.clone();
+                                let t = OffsetDateTime::now_local()?;
+                                if status.current_dialog.is_adding() {
+                                    let mut note_to_add = Note {
+                                        data,
+                                        created_at: t,
+                                        edited_at: t,
+                                        status: note_status,
+                                        children: vec![],
+                                        parent: None,
+                                    };
+                                    if let Some(add_to) = status.selected_index.0.as_ref() {
+                                        note_to_add.parent = Some(Rc::clone(add_to));
+                                        add_to.borrow_mut().children.insert(
+                                            status.selected_index.1,
+                                            Rc::new(RefCell::new(note_to_add)),
+                                        );
                                     } else {
-                                        let selected = status.selected.as_ref().unwrap();
-                                        let mut edit = selected.borrow_mut();
-                                        edit.data = data;
-                                        edit.status = note_status;
-                                        edit.edited_at = t;
+                                        status.root_notes.insert(
+                                            status.selected_index.1,
+                                            Rc::new(RefCell::new(note_to_add)),
+                                        );
                                     }
+                                    scroll_down(&mut status);
+                                } else {
+                                    let selected = status.selected.as_ref().unwrap();
+                                    let mut edit = selected.borrow_mut();
+                                    edit.data = data;
+                                    edit.status = note_status;
+                                    edit.edited_at = t;
                                 }
-                                status.current_dialog = Dialog::None;
                             }
+                            status.current_dialog = Dialog::None;
                         }
                         _ => {}
                     },
@@ -720,9 +858,10 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                 );
                 frame.render_widget(
                     Block::new()
-                        .borders(Borders::BOTTOM)
-                        .title(if let Some(ref note) = status.selected {
-                            status.status_bar = None;
+                        .borders(Borders::TOP)
+                        .title(if let Some(status_bar) = status.status_bar.clone() {
+                            status_bar
+                        } else if let Some(ref note) = status.selected {
                             let note = note.borrow();
                             format!(
                                 "{} - created at {}{}",
@@ -746,7 +885,7 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                                 {
                                     String::new()
                                 } else {
-                                    format!(
+                                    color_eyre::owo_colors::OwoColorize::green(&format!(
                                         "; last edited at {}",
                                         color_eyre::owo_colors::OwoColorize::blue(
                                             &note
@@ -756,13 +895,11 @@ fn render(status: &mut Status) -> impl FnOnce(&mut ratatui::Frame<'_>) {
                                                 )
                                                 .unwrap()
                                         )
-                                    )
+                                    ))
+                                    .to_string()
                                 }
                             )
-                        } else if let Some(status_bar) = status.status_bar.clone() {
-                            status_bar
                         } else {
-                            status.status_bar = None;
                             String::new()
                         })
                         .red(),
