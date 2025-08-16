@@ -9,7 +9,11 @@
 - Backspace/Left arrow - view the children of the parent note.
 - A - Add a new note.
 - E (while selecting a note) - Edit the selected note.
-- D/Delete - Delete the selected note.
+- Delete - Delete the selected note.
+- D - Duplicate the selected note. Equivalent to quickly pressing C then V.
+- C - Copy the selected note.
+- X - Cut the selected note.
+- V - Paste the selected note.
 
 ## Adding/editing mode
 
